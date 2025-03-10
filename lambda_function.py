@@ -46,6 +46,7 @@ PostgresURL = f"postgresql://postgres:{os.environ['PostgresURL']}@database-2.cfy
 TOGETHER_API_KEY = os.environ['TOGETHER_API_KEY']
 COHERE_API_KEY = os.environ['COHERE_API_KEY']
 QDRANT_API_KEY = os.environ['QDRANT_API_KEY']
+USE_SQS = True
 
 class State(MessagesState):
     summary: str
@@ -156,7 +157,6 @@ def getSAUGY():
     'https://megapx-assets.dcard.tw/images/3f1570cb-2916-4964-b820-471685178f13/full.png',
     ]
     return result_url
-
 def getDINU():
     result_url = [
     'https://sticker-assets.dcard.tw/images/764ff643-b618-4691-8e8b-7646a4d86e2d/orig.png',
@@ -420,7 +420,6 @@ def getREMI():
 
     ]
     return result_url
-
 def isKeywordautorReply(message):
     keywordlist = ['HOYA-L3', 'HOYA-L2', 'HOYA-L1', 'LYNN','DINU-L3',
                     'DINU-L2', 'DINU-L1', 'SAUGY-L3', 'SAUGY-L2', 'SAUGY-L1',
@@ -489,7 +488,6 @@ def add_to_existing_string_set(user_id, new_message):
         ReturnValues="UPDATED_NEW"
     )
     return response
-
 
 def linebot(event):
     
@@ -821,32 +819,27 @@ def linebot(event):
     return 'Default Return'
 
 def handler(event, context):
-    # TODO implement
-    # event = event['Records'][0]     # We know use direct API         # We use asynchronous invocation from SQS so we need to get Line webhook event using key Records
+
     print("the event is :", event, '\n')
 
-    # client = Together()
-    # stream = client.chat.completions.create(
-    #         model="meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo",
-    #         messages=[{"role": "user", "content": "Hi, how are you"}],
-    #         stream=True
-    # )
-    # message=''
-    # for chunk in stream:
-    #     message = message + (chunk.choices[0].delta.content)
-    # print(message)
-    # table = dynamodb.Table('chat_history2')
-    # _ = add_to_string_set('1234', 'Hi, what about you.')
-    # item = read_from_dynamodb('1234')
-    # print(item)
+    if USE_SQS == True:
+        event = event['Records'][0]   # We use  standard SQS and have a default Records key at outer scope
+
     message_result = linebot(event)
-    print(message_result)
+    print('Message result:', message_result)
 
-        
-        
-    
+
+    # Need to delete message that have processed
+    if USE_SQS == True:
+        try:
+            sqs = boto3.client('sqs')
+            queue_url = 'https://sqs.ap-southeast-1.amazonaws.com/438465157691/langchain_lambda'
+            receipt_handle = event['receiptHandle']
+            sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt_handle)
+        except Exception as e:
+            print(f"Error deleting message from queue. {str(e)}")
+
     # signature = event['headers']['x-line-signature']
-
     # # get request body as text
     # body = event['body']
     # try:
