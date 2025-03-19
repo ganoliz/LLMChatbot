@@ -193,7 +193,7 @@ def linebot(event):
             connection_kwargs = {"autocommit": True, "prepare_threshold": 0}
 
             def rewrite(state: State):
-                """Rewrite query if we have some question associate with chat history"""
+                """Rewrite query when we have some question associate with chat history."""
 
                 print("---REWRITE QUERY---")
                 conversation_history = [message for message in state["messages"] if message.type in ("human", "system")
@@ -284,7 +284,7 @@ def linebot(event):
                 return {"messages": [response]}
 
             def respond(state: State):
-                """Response without documents"""
+                """Response directly without documents."""
 
                 print("---RESPOND DIRECTLY---")
 
@@ -318,7 +318,9 @@ def linebot(event):
                     description="Documents are relevant to the question, 'yes' or 'no'"
                 )
 
+
             def grade_documents(state: State):
+                """Grade retrieved documents is related to user query or not."""
 
                 print("---CHECK DOCUMENT RELEVANCE TO QUESTION---")
                 question = state["question"]
@@ -363,6 +365,7 @@ def linebot(event):
                 return {"documents": filtered_docs}
 
             def summarize_conversation(state: State):
+                """Summarize chat history when chat history is too long."""
 
                 summary = state.get("summary", "")
                 if summary:
@@ -456,7 +459,7 @@ def linebot(event):
                                                                        value=f"{USER_ID}"))])  # "metadata": user_id .{"must": [{"key": "user_id", "match":{"value": "test1"}}]}
                 vectorstore.client.delete(collection_name="PDF_Langchain", points_selector=filter)
 
-                # Delete postgres chat history
+                # Delete PostgresSQL chat history
                 with Connection.connect(DB_URI, **connection_kwargs) as conn:
 
                     config = {"configurable": {"thread_id": f"{USER_ID}"}}
@@ -568,6 +571,7 @@ def linebot(event):
 
     return 'Default Return'
 
+# Entrypoint of AWS Lambda
 def handler(event, context):
 
     print("the event is :", event, '\n')
@@ -589,23 +593,8 @@ def handler(event, context):
         except Exception as e:
             print(f"Error deleting message from queue. {str(e)}")
 
-    # signature = event['headers']['x-line-signature']
-    # # get request body as text
-    # body = event['body']
-    # try:
-    #     handler.handle(body, signature)
-    # except InvalidSignatureError:
-    #     return {
-    #         'statusCode': 502,
-    #         'body': json.dumps("Invalid signature. Please check your channel access token/channel secret.")
-    #         }
-    
     return {
         'statusCode': 200,
         'body': json.dumps('Hello from Lambda!')
     }
 
-
-
-# if __name__ == '__main__':
-#     app.run()
