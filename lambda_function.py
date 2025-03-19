@@ -26,8 +26,9 @@ from langchain_core.documents import Document
 # Jina AI Reader model
 import requests
 
-from langchain_core.messages import SystemMessage, RemoveMessage
+from langchain_core.messages import SystemMessage, RemoveMessage, AIMessage
 from langchain_core.tools import tool
+from langchain_core.prompts.chat import ChatPromptTemplate
 
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import MessagesState, StateGraph, START, END
@@ -40,6 +41,8 @@ from langchain.retrievers.contextual_compression import ContextualCompressionRet
 from langchain_core.messages import HumanMessage
 from utils import getSAUGY, getDINU, getHOYA, getLYNN, getZOLLY, getREMI, getBOB
 from utils import is_emoji, isKeywordautorReply, sticker_list
+from pydantic import BaseModel, Field
+
 
 line_bot_api = LineBotApi(os.environ['channel_access_token'])
 handler = WebhookHandler(os.environ['channel_secret'])
@@ -52,6 +55,8 @@ USE_SQS = True
 
 class State(MessagesState):
     summary: str
+    question: str
+    documents: str
 
 # Initialize DynamoDB resource
 dynamodb = boto3.resource('dynamodb')
@@ -187,71 +192,79 @@ def linebot(event):
             DB_URI = PostgresURL
             connection_kwargs = {"autocommit": True, "prepare_threshold": 0}
 
+            def rewrite(state: State):
+                """Rewrite query if we have some question associate with chat history"""
 
-            # Retrieve docs and return content and raw document
-            @tool(response_format="content_and_artifact")
-            def retrieve(query: str):
+                print("---REWRITE QUERY---")
+                conversation_history = [message for message in state["messages"] if message.type in ("human", "system")
+                                        or (message.type == "ai" and not message.tool_calls)]
+
+                sys_prompt = [SystemMessage(
+                    f"You are an AI assistant that reformulates user queries for better retrieval. "
+                    "If the user's query depends on previous messages for context, rewrite it to be self-contained. "
+                    "If the query is already independent and clear, return it as is. If you can't figure it out, just return the same query."
+                    "ONLY NEED THE QUERY DON'T EXPLAIN"
+                    f"Here is the chat history:")] + conversation_history
+                query = state["messages"][-1]
+                user_query = HumanMessage(f"{query}.")
+
+                query_rewrite_prompt = sys_prompt + [user_query]
+
+                llm = ChatTogether(
+                    model='deepseek-ai/DeepSeek-R1-Distill-Llama-70B-free',
+                    together_api_key=TOGETHER_API_KEY)
+                response = llm.invoke(query_rewrite_prompt)
+
+                print("Before transform:", response)
+                rewrite_content = response.content
+                start_index = rewrite_content.rfind('</think>')
+                if start_index != -1:
+                    response = rewrite_content[start_index + 8:]
+
+                print(response)
+                response = AIMessage(response)
+
+                messages = []
+                messages.append(user_query)
+                # messages.append(response)
+
+                print("---REWRITE FINISHED---")
+                return {"question": response}
+
+            def retrieve(state: State):
                 """Retrieve information related to a query."""
+
+                print("---RETRIEVE---")
+                query = state["question"].content
                 retriever = vectorstore.as_retriever(
-                    search_kwargs={'k': 50, 'filter': {"user_id": USER_ID}})
+                    search_kwargs={'k': 50, 'filter': {"user_id": USER_ID}})  # , "source": WEB_URL
                 compressor = CohereRerank(model='rerank-english-v3.0',
-                                          cohere_api_key=COHERE_API_KEY, top_n=10)
+                                          cohere_api_key=COHERE_API_KEY, top_n=7)
                 compression_retriever = ContextualCompressionRetriever(base_compressor=compressor,
                                                                        base_retriever=retriever)
                 retrieved_docs = compression_retriever.invoke(query)
                 serialized = "\n\n".join(
-                    (f"Source: {doc.metadata['source']}\n" f"Content: {doc.page_content}") for doc in retrieved_docs)
-                return serialized, retrieved_docs
-            # Query documents or direct respond
-            def query_or_respond(state: State):
-                """Generate tool call for retrieval or respond."""
-                summary = state.get("summary", "")
+                    (f"Source: {(doc.metadata['source'])}\n" f"Content: {doc.page_content}") for doc in retrieved_docs)
 
-                if summary:
-                    system_message = f"Summary of conversation earlier: {summary}"
-                    messages = [SystemMessage(content=system_message)] + state["messages"]
-                else:
-                    messages = state["messages"]
+                print(serialized)
+                print("---RETRIEVE FINISHED---")
 
-                llm_with_tools = llm.bind_tools([retrieve])
-                response = llm_with_tools.invoke(messages, tool_choice="retrieve")
-                retry_times = 5
-                retry = 0
-                message_retry = []
-                while ((response.content.startswith("<function=retrieve>") or response.content.startswith(
-                        '{"name": "retrieve"')) and (retry < retry_times)):
-                    print(f"============ Error response:{response.content}. Retry {retry} times. ==============\n")
-                    message_retry = messages.copy()
-                    message_retry.append(response)
-                    err_msg = HumanMessage(
-                        content="The last tool call raised an exception. Try calling the tool again with corrected arguments. Do not repeat mistakes.")
-                    message_retry.append(err_msg)
-                    response = llm_with_tools.invoke(message_retry, tool_choice="retrieve")
-                    retry = retry + 1
+                return {"documents": serialized, "question": query}
 
-                return {"messages": [response]}
-
-            tools = ToolNode([retrieve])
             # Generate responds from retrieve documents
             def generate(state: State):
                 """Generate answer."""
 
+                print("---GENERATE ANSWER---")
                 summary = state.get("summary", "")
                 summary_message = ""
                 if summary:
                     summary_message = f"Summary of conversation earlier: {summary}"
 
-                recent_tool_messages = []
-                for message in reversed(state["messages"]):
-                    if message.type == "tool":
-                        recent_tool_messages.append(message)
-                    else:
-                        break
-                tool_messages = recent_tool_messages[::-1]  # only use the last tool recent_tool_messages[::-1]
-                # Format into prompt
-                docs_content = "\n\n".join(doc.content for doc in tool_messages)
+                docs_content = state["documents"]
+
                 system_message_content = (
-                    f"""You are an assistant forquestion-answering tasks. Use
+                    f"""You are an assistant for question-answering tasks. Use
                         the following pieces of retrieved context to answer the question. If you don't
                         know the answer, say that you don't know. Use ten sentences maximum and keep the answer concise.
                         \n\n {docs_content}. {summary_message}"""
@@ -261,16 +274,93 @@ def linebot(event):
                                          or (message.type == "ai" and not message.tool_calls)]
 
                 prompt = [SystemMessage(system_message_content)] + conversation_messages
+                llm = ChatTogether(
+                    model='deepseek-ai/DeepSeek-R1-Distill-Llama-70B-free',
+                    together_api_key=TOGETHER_API_KEY)
                 response = llm.invoke(prompt)
-                print(f"We generation content {response}")
 
-                delete_messages = []
-                for m in state["messages"]:
-                    if m.type == 'tool' or len(m.content) == 0:
-                        delete_messages.append(RemoveMessage(id=m.id))
-                delete_messages.append(response)
+                print(response)
+                print("---GENERATE FINISHED---")
+                return {"messages": [response]}
 
-                return {"messages": delete_messages}
+            def respond(state: State):
+                """Response without documents"""
+
+                print("---RESPOND DIRECTLY---")
+
+                summary = state.get("summary", "")
+                summary_message = ""
+                if summary:
+                    summary_message = f"Summary of conversation earlier: {summary}"
+
+                system_message_content = (
+                    f"""{summary_message}"""
+                )
+
+                conversation_messages = [message for message in state["messages"] if message.type in ("human", "system")
+                                         or (message.type == "ai" and not message.tool_calls)]
+
+                prompt = [SystemMessage(system_message_content)] + conversation_messages
+
+                llm = ChatTogether(
+                    model='deepseek-ai/DeepSeek-R1-Distill-Llama-70B-free',
+                    together_api_key=TOGETHER_API_KEY)
+                question = prompt + [state["question"]]
+                messages = llm.invoke(question)
+
+                print(messages)
+                print("---RESPOND FINISHED---")
+                return {"messages": [messages]}
+
+            class GradeDocuments(BaseModel):
+                """Binary score for relevance check on retrieved documents."""
+                binary_score: str = Field(
+                    description="Documents are relevant to the question, 'yes' or 'no'"
+                )
+
+            def grade_documents(state: State):
+
+                print("---CHECK DOCUMENT RELEVANCE TO QUESTION---")
+                question = state["question"]
+                documents = state["documents"]
+
+                llm = ChatTogether(
+                    model='meta-llama/Llama-3.3-70B-Instruct-Turbo-Free',
+                    together_api_key=TOGETHER_API_KEY)
+                structured_llm_grader = llm.with_structured_output(GradeDocuments)
+
+                # Prompt
+                system = """You are a grader assessing relevance of a retrieved document to a user question. \n 
+                    It does not need to be a stringent test. The goal is to filter out erroneous retrievals. \n
+                    If the document contains keyword(s) or semantic meaning related to the user question, grade it as relevant. \n
+                    Give a binary score 'yes' or 'no' score to indicate whether the document is relevant to the question."""
+                grade_prompt = ChatPromptTemplate.from_messages(
+                    [
+                        ("system", system),
+                        ("human", "Retrieved document: \n\n {document} \n\n User question: {question}"),
+                    ]
+                )
+
+                retrieval_grader = grade_prompt | structured_llm_grader
+
+                score = retrieval_grader.invoke({"question": question, "document": documents})
+
+                filtered_docs = []
+
+                # Early return if Llama LLM have error to output (not formatted)
+                try:
+                    grade = score.binary_score
+                except:
+                    grade = 'no'
+                    return {"documents": filtered_docs}
+
+                if grade == 'yes':
+                    print("---GRADE: DOCUMENT RELEVANT---")
+                    filtered_docs.append(documents)
+                else:
+                    print("---GRADE: DOCUMENT NOT RELEVANT---")
+
+                return {"documents": filtered_docs}
 
             def summarize_conversation(state: State):
 
@@ -282,6 +372,9 @@ def linebot(event):
                     summary_message = "Create a summary of the conversation above:"
 
                 messages = state["messages"] + [HumanMessage(content=summary_message)]
+                llm = ChatTogether(
+                    model='meta-llama/Llama-3.3-70B-Instruct-Turbo-Free',
+                    together_api_key=TOGETHER_API_KEY)
                 response = llm.invoke(messages)
 
                 delete_num = 0
@@ -291,7 +384,7 @@ def linebot(event):
                         delete_messages.append(RemoveMessage(id=m.id))
                         delete_num = delete_num + 1
 
-                history_length = 15
+                history_length = 8
                 history_preserve = 4
                 if (len(state["messages"]) > history_length):
 
@@ -307,21 +400,52 @@ def linebot(event):
 
                 return {"summary": response.content, "messages": delete_messages}
 
+            # Edges
+            def decide_respond_or_generate(state: State):
+                """
+                Determines whether to generate an answer from documents or respond directly.
 
+                Args:
+                    state(dict): The current graph state
+
+                Returns:
+                    str: Binary decision for next node to call
+
+                """
+
+                print("---ASSESS GRADED DOCUMENTS---")
+                filtered_documents = state["documents"]
+
+                if not filtered_documents:
+                    print(
+                        "---DECISION: DOCUMENTS ARE NOT RELEVANT TO QUESTION, DIRECT RESPOND---"
+                    )
+
+                    return "respond"
+
+                else:
+                    print("---DECISION: GENERATE---")
+
+                    return "generate"
 
             graph_builder = StateGraph(State)  # StateGraph(MessagesState)
-            graph_builder.add_node(query_or_respond)
-            graph_builder.add_node(tools)
+
+            graph_builder.add_node(rewrite)
+            graph_builder.add_node(retrieve)
+            graph_builder.add_node(grade_documents)
+            graph_builder.add_node(respond)
             graph_builder.add_node(generate)
             graph_builder.add_node(summarize_conversation)
 
-            graph_builder.add_edge(START, "query_or_respond")
-            graph_builder.add_conditional_edges("query_or_respond", tools_condition,
-                                                {END: END, "tools": "tools"})
-            graph_builder.add_edge("tools", "generate")
+            graph_builder.add_edge(START, "rewrite")
+            graph_builder.add_edge("rewrite", "retrieve")
+            graph_builder.add_edge("retrieve", "grade_documents")
+            graph_builder.add_conditional_edges("grade_documents", decide_respond_or_generate,
+                                                {"respond": "respond",
+                                                          "generate": "generate",},)
             graph_builder.add_edge("generate", "summarize_conversation")
+            graph_builder.add_edge("respond", "summarize_conversation")
             graph_builder.add_edge("summarize_conversation", END)
-
 
             if "!清除記憶" in msg or "！清除記憶" in msg:
                 # table.delete_item(Key={'user_channel': user_channel, 'user_info': 'None'})
@@ -428,6 +552,11 @@ def linebot(event):
                 input_message = HumanMessage(content=f"{msg}")
                 all_messages = app.invoke({"messages":[input_message]}, config)
                 ai_message = all_messages["messages"][-1].content
+
+                if ai_message.find('<think>') != -1 and ai_message.find('</think>') != -1:
+                    ai_message = ai_message.replace('<think>', '思路整理中(o´・ω・`): ')
+                    ai_message = ai_message.replace('</think>', '思考人生完畢!(,,・ω・,,)')
+
                 state = app.get_state(config).values  # state is a dict of several messages
                 temp = checkpointer.get_tuple(config)
 
