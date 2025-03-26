@@ -12,4 +12,4 @@ LLM-powered Chatbot Assistant Using LangChain and Langgraph framework.
 
 Here is my workflow:
 
-![image](https://github.com/ganoliz/LLMChatbot/blob/main/images/rag_flow.png)
+![image](https://github.com/ganoliz/LLMChatbot/blob/main/images/rag_flow2.png)
