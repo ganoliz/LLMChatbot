@@ -8,7 +8,7 @@ LLM-powered Chatbot Assistant Using LangChain and Langgraph framework.
 * Implemented Retrieval-Augmented Generation (RAG) using LangChain, supporting PDF, URLs, and text files as knowledge sources.
 * Integrated Qdrant as the vector database for embedding storage, utilizing Cohere’s embedding and reranking models for enhanced retrieval.
 * Leveraged **DeepSeek R1 Distilled Llama 70B** and **Meta’s Llama-3 70B** as the primary LLM for intelligent responses.
-* Designed a chat memory mechanism using AWS RDS PostgreSQL to maintain conversation context per user.
+* Designed a chat memory mechanism using **AWS RDS PostgreSQL** to maintain conversation context per user.
 
 Here is my workflow:
 
